@@ -1,0 +1,12 @@
+﻿venv/
+*.pkl
+*.nii
+*.nii.gz
+notebooks/*_files/
+data/
+models/
+*.png
+*.pyc
+__pycache__/
+.DS_Store
+Thumbs.db
