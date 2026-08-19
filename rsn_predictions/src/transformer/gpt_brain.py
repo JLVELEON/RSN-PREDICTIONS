@@ -26,7 +26,7 @@ class Config:
 # ============================================================
 # Ruta al archivo de state_codes generado en Notebook4
 # Ajusta la ruta según la ubicación real de tu archivo
-state_codes_path = "../../notebooks/state_codes.pkl"
+state_codes_path = "../../notebooks/state_codes_all.pkl"
 
 with open(state_codes_path, 'rb') as f:
     state_codes = pickle.load(f)
