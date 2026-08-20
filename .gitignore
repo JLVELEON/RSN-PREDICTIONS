@@ -10,3 +10,8 @@ models/
 __pycache__/
 .DS_Store
 Thumbs.db
+tmp/
+# Archivos grandes de prueba
+test.nii.gz*
+*.nii.gz.*
+*.nii.gz

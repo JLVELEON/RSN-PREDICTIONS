@@ -99,3 +99,7 @@ target/
 *.tar.gz
 data/       
 models/      
+# Archivos grandes de prueba
+test.nii.gz*
+*.nii.gz.*
+*.nii.gz

@@ -1,20 +1,20 @@
 import os
+import sys
 import pickle
 import numpy as np
 import nibabel as nib
 from nilearn.maskers import NiftiMasker
-import openneuro as on
 import shutil
 import logging
 import datetime
+import subprocess
+import concurrent.futures
 
 # ============================================================
 # 0. CONFIGURACIÓN DE PRUEBA (SOLO 3 SUJETOS)
 # ============================================================
-# 🔧 CAMBIA ESTA LISTA CON LOS 3 SUJETOS QUE QUIERAS PROBAR
-# Asegúrate de que existan en el dataset. 
-# Si no sabes cuáles, usa los que aparecían en los errores: 'sub-090', 'sub-100', 'sub-101'
-TEST_SUBJECTS = ['sub-011', 'sub-012', 'sub-013']   # <--- PON AQUÍ LOS 3 QUE QUIERAS
+TEST_SUBJECTS = ['sub-011', 'sub-012', 'sub-013']   # <--- CAMBIA ESTO
+MAX_WORKERS = 3   # descargas simultáneas
 
 # ============================================================
 # 1. Configurar logging
@@ -66,7 +66,75 @@ def process_subject(file_path):
         raise
 
 # ============================================================
-# 4. Procesar los 3 sujetos de prueba (con reanudación)
+# 4. Encontrar la ruta de AWS CLI (priorizando aws.exe)
+# ============================================================
+def get_aws_path():
+    # Buscar aws.exe en el entorno virtual
+    venv_aws_exe = os.path.join(sys.prefix, 'Scripts', 'aws.exe')
+    if os.path.exists(venv_aws_exe):
+        return venv_aws_exe
+    # Buscar aws en el PATH
+    aws_path = shutil.which('aws')
+    if aws_path:
+        return aws_path
+    # Si no, buscar en rutas comunes
+    common_paths = [
+        r'C:\Program Files\Amazon\AWSCLIV2\aws.exe',
+        r'C:\Program Files (x86)\Amazon\AWSCLIV2\aws.exe',
+    ]
+    for p in common_paths:
+        if os.path.exists(p):
+            return p
+    raise FileNotFoundError("No se encontró AWS CLI. Asegúrate de que esté instalado y en el PATH.")
+
+AWS_CMD = get_aws_path()
+print(f"Usando AWS CLI en: {AWS_CMD}")
+
+# ============================================================
+# 5. Función de descarga con AWS CLI (MUESTRA PROGRESO EN TIEMPO REAL)
+# ============================================================
+def download_with_aws(subject_id, run, target_dir='./tmp/'):
+    file_path = f"{subject_id}/func/{subject_id}_task-rest_run-{run:02d}_bold.nii.gz"
+    s3_path = f"s3://openneuro.org/ds005747/{file_path}"
+    local_file = os.path.join(target_dir, file_path)
+    os.makedirs(os.path.dirname(local_file), exist_ok=True)
+    
+    # Si el archivo ya existe y tiene un tamaño razonable (>100MB), lo reutilizamos
+    if os.path.exists(local_file) and os.path.getsize(local_file) > 100_000_000:
+        print(f"  ⏩ {subject_id} run-{run:02d} ya existe ({os.path.getsize(local_file)/1e6:.1f} MB), se omite descarga.")
+        return local_file
+    elif os.path.exists(local_file):
+        print(f"  ⚠️ {subject_id} run-{run:02d} existe pero es pequeño o corrupto, se descarga de nuevo.")
+        os.remove(local_file)
+    
+    # Construir el comando con la ruta completa
+    cmd = [AWS_CMD, "s3", "cp", "--no-sign-request", s3_path, local_file]
+    
+    print(f"  🚀 Descargando {subject_id} run-{run:02d} ...")
+    # Ejecutar mostrando la salida en tiempo real (heredada de la terminal)
+    # Esto mostrará las barras de progreso de AWS
+    subprocess.run(cmd, check=True)
+    
+    print(f"  ✅ Descargado {subject_id} run-{run:02d} ({os.path.getsize(local_file)/1e6:.1f} MB)")
+    return local_file
+
+# ============================================================
+# 6. Función que procesa un sujeto/run completo
+# ============================================================
+def process_one_run(subject_id, run):
+    local_file = download_with_aws(subject_id, run)
+    codes = process_subject(local_file)
+    # Limpiar archivo después de procesar
+    os.remove(local_file)
+    # Limpiar carpeta si está vacía
+    try:
+        shutil.rmtree(os.path.dirname(local_file), ignore_errors=True)
+    except:
+        pass
+    return codes
+
+# ============================================================
+# 7. Procesamiento principal (con reanudación y paralelismo)
 # ============================================================
 PROGRESS_FILE = 'progress_state_codes.pkl'
 LAST_INDEX_FILE = 'last_index.txt'
@@ -88,67 +156,62 @@ if os.path.exists(LAST_INDEX_FILE):
     print(f"Reanudando desde sujeto {TEST_SUBJECTS[start_idx]} (índice {start_idx}), run {start_run}")
 
 print(f"Usando {len(TEST_SUBJECTS)} sujetos de prueba: {TEST_SUBJECTS}")
+print(f"Descargas paralelas: {MAX_WORKERS} a la vez\n")
 
+# Limpiar archivos corruptos en tmp (menores a 100MB)
+for root, dirs, files in os.walk('./tmp/'):
+    for file in files:
+        if file.endswith('.nii.gz'):
+            filepath = os.path.join(root, file)
+            if os.path.getsize(filepath) < 100_000_000:
+                print(f"  🗑️ Eliminando archivo corrupto: {filepath}")
+                os.remove(filepath)
+
+# Construir lista de tareas
+tasks = []
 for idx in range(start_idx, len(TEST_SUBJECTS)):
     subject_id = TEST_SUBJECTS[idx]
-    runs_to_process = range(start_run, 4) if idx == start_idx else range(1, 4)
-    for run in runs_to_process:
-        file_path = f"{subject_id}/func/{subject_id}_task-rest_run-{run:02d}_bold.nii.gz"
+    runs = range(start_run, 4) if idx == start_idx else range(1, 4)
+    for run in runs:
+        tasks.append((subject_id, run, idx))
+
+def run_task(subject_id, run, idx):
+    try:
+        codes = process_one_run(subject_id, run)
+        return idx, codes, True, None
+    except Exception as e:
+        return idx, None, False, str(e)
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    future_to_task = {
+        executor.submit(run_task, sub, run, idx): (sub, run, idx)
+        for sub, run, idx in tasks
+    }
+    
+    for future in concurrent.futures.as_completed(future_to_task):
+        sub, run, idx = future_to_task[future]
         try:
-            print(f"Descargando y procesando {subject_id}, run-{run:02d}...")
-            on.download(dataset='ds005747', target_dir='./tmp/', include=file_path)
-            local_file = os.path.join('./tmp/', file_path)
-            
-            if not os.path.exists(local_file):
-                print(f"  ⚠️ El archivo no se ha descargado: {local_file}")
-                with open(LAST_INDEX_FILE, 'w') as f:
-                    f.write(f"{idx} {run}")
-                continue
-            
-            print(f"  ✅ Archivo descargado: {local_file}")
-            
-            try:
-                codes = process_subject(local_file)
-                print(f"  -> Códigos obtenidos: {len(codes)}")
-            except Exception as e_proc:
-                print(f"  ❌ Error en process_subject: {e_proc}")
-                logging.error(f"Error en process_subject {subject_id} run-{run:02d}: {e_proc}")
+            task_idx, codes, success, error = future.result()
+            if success:
+                all_state_codes.extend(codes.tolist())
+                print(f"  ✅ {sub} run-{run:02d} procesado (total: {len(all_state_codes)})")
                 with open(PROGRESS_FILE, 'wb') as f:
                     pickle.dump(all_state_codes, f)
                 with open(LAST_INDEX_FILE, 'w') as f:
                     f.write(f"{idx} {run}")
-                continue
-            
-            all_state_codes.extend(codes.tolist())
-            print(f"  -> {len(codes)} tokens añadidos (total: {len(all_state_codes)})")
-            
-            # Limpiar archivo y carpeta
-            os.remove(local_file)
-            shutil.rmtree(os.path.dirname(local_file), ignore_errors=True)
-            
-            # Guardar progreso después de cada run
-            with open(PROGRESS_FILE, 'wb') as f:
-                pickle.dump(all_state_codes, f)
-            with open(LAST_INDEX_FILE, 'w') as f:
-                f.write(f"{idx} {run}")
-                
-        except FileNotFoundError:
-            print(f"  -> {subject_id}, run-{run:02d} no encontrado (posiblemente no existe)")
-            with open(LAST_INDEX_FILE, 'w') as f:
-                f.write(f"{idx} {run}")
+            else:
+                print(f"  ❌ {sub} run-{run:02d} falló: {error}")
+                logging.error(f"Error en {sub} run-{run:02d}: {error}")
+                with open(PROGRESS_FILE, 'wb') as f:
+                    pickle.dump(all_state_codes, f)
+                with open(LAST_INDEX_FILE, 'w') as f:
+                    f.write(f"{idx} {run}")
         except Exception as e:
-            print(f"  ❌ Error general: {e}")
-            logging.error(f"Error en {subject_id}, run-{run:02d}: {e}")
-            with open(PROGRESS_FILE, 'wb') as f:
-                pickle.dump(all_state_codes, f)
-            with open(LAST_INDEX_FILE, 'w') as f:
-                f.write(f"{idx} {run}")
-            # raise  # si quieres parar
-    # Reiniciar run para el siguiente sujeto
-    start_run = 1
+            print(f"  ❌ Error inesperado en {sub} run-{run:02d}: {e}")
+            logging.error(f"Error inesperado en {sub} run-{run:02d}: {e}")
 
 # ============================================================
-# 5. Guardar resultados
+# 8. Guardar resultados finales
 # ============================================================
 all_state_codes = np.array(all_state_codes)
 with open('state_codes_all.pkl', 'wb') as f:
@@ -159,6 +222,6 @@ if os.path.exists(PROGRESS_FILE):
 if os.path.exists(LAST_INDEX_FILE):
     os.remove(LAST_INDEX_FILE)
 
-print(f"\nProcesamiento completado.")
+print(f"\n✅ Procesamiento completado.")
 print(f"Total de tokens: {len(all_state_codes)}")
 print(f"Guardado en: state_codes_all.pkl")
