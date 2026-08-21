@@ -5,9 +5,10 @@ with open('state_codes_all.pkl', 'rb') as f:
     codes = pickle.load(f)
 
 print(f"Total tokens: {len(codes)}")
-print("Distribución de tokens:", np.bincount(codes))
+print(f"Tokens únicos: {len(np.unique(codes))}")
+print(f"Distribución de tokens (primeros 10): {np.bincount(codes)[:10]}")
 
-# Convertir a binario y calcular tasas por red
+# Convertir a binario para ver tasas de activación por red
 binary = np.array([[(code >> b) & 1 for b in range(6, -1, -1)] for code in codes])
 rates = binary.mean(axis=0)
-print("Tasas de activación por red:", rates)
+print(f"Tasas de activación por red: {rates}")

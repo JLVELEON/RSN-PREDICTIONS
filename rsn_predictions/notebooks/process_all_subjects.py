@@ -9,15 +9,27 @@ import logging
 import datetime
 import subprocess
 import concurrent.futures
+import warnings
 
 # ============================================================
-# 0. CONFIGURACIÓN DE PRUEBA (SOLO 3 SUJETOS)
+# 0. CONFIGURACIÓN
 # ============================================================
-TEST_SUBJECTS = ['sub-011', 'sub-012', 'sub-013']   # <--- CAMBIA ESTO
-MAX_WORKERS = 3   # descargas simultáneas
+# Pon True para procesar TODOS los sujetos, False para usar TEST_SUBJECTS
+PROCESS_ALL = True   # Cambia a False si quieres una lista manual
+
+# Lista manual (solo se usa si PROCESS_ALL = False)
+TEST_SUBJECTS = ['sub-011', 'sub-012', 'sub-013']
+
+# Número de descargas simultáneas (ajústalo)
+MAX_WORKERS = 3
 
 # ============================================================
-# 1. Configurar logging
+# 1. Suprimir warnings de Nilearn y otras librerías
+# ============================================================
+warnings.filterwarnings('ignore')
+
+# ============================================================
+# 2. Configurar logging (solo errores graves)
 # ============================================================
 log_filename = f"processing_errors_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 logging.basicConfig(
@@ -27,7 +39,7 @@ logging.basicConfig(
 )
 
 # ============================================================
-# 2. Cargar las máscaras
+# 3. Cargar las máscaras
 # ============================================================
 with open('mask_imgs_tutor.pkl', 'rb') as f:
     mask_imgs_tutor = pickle.load(f)
@@ -35,7 +47,7 @@ with open('mask_imgs_tutor.pkl', 'rb') as f:
 os.makedirs('./tmp/', exist_ok=True)
 
 # ============================================================
-# 3. Función para procesar un sujeto
+# 4. Función para procesar un sujeto (sin cambios, pero suprimimos warnings internos)
 # ============================================================
 def process_subject(file_path):
     try:
@@ -66,18 +78,15 @@ def process_subject(file_path):
         raise
 
 # ============================================================
-# 4. Encontrar la ruta de AWS CLI (priorizando aws.exe)
+# 5. Encontrar la ruta de AWS CLI
 # ============================================================
 def get_aws_path():
-    # Buscar aws.exe en el entorno virtual
     venv_aws_exe = os.path.join(sys.prefix, 'Scripts', 'aws.exe')
     if os.path.exists(venv_aws_exe):
         return venv_aws_exe
-    # Buscar aws en el PATH
     aws_path = shutil.which('aws')
     if aws_path:
         return aws_path
-    # Si no, buscar en rutas comunes
     common_paths = [
         r'C:\Program Files\Amazon\AWSCLIV2\aws.exe',
         r'C:\Program Files (x86)\Amazon\AWSCLIV2\aws.exe',
@@ -85,13 +94,32 @@ def get_aws_path():
     for p in common_paths:
         if os.path.exists(p):
             return p
-    raise FileNotFoundError("No se encontró AWS CLI. Asegúrate de que esté instalado y en el PATH.")
+    raise FileNotFoundError("No se encontró AWS CLI.")
 
 AWS_CMD = get_aws_path()
 print(f"Usando AWS CLI en: {AWS_CMD}")
 
 # ============================================================
-# 5. Función de descarga con AWS CLI (MUESTRA PROGRESO EN TIEMPO REAL)
+# 6. Función para obtener todos los sujetos (usando AWS S3 ls)
+# ============================================================
+def get_all_subjects():
+    cmd = [AWS_CMD, "s3", "ls", "s3://openneuro.org/ds005747/", "--no-sign-request"]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    lines = result.stdout.splitlines()
+    subjects = []
+    for line in lines:
+        # Salida típica: "                           PRE sub-090/"
+        if "PRE sub-" in line:
+            parts = line.split()
+            # El último elemento es 'sub-090/'
+            subject = parts[-1].strip('/')
+            if subject.startswith('sub-'):
+                subjects.append(subject)
+    subjects.sort()
+    return subjects
+
+# ============================================================
+# 7. Función de descarga con AWS CLI (muestra progreso)
 # ============================================================
 def download_with_aws(subject_id, run, target_dir='./tmp/'):
     file_path = f"{subject_id}/func/{subject_id}_task-rest_run-{run:02d}_bold.nii.gz"
@@ -99,7 +127,6 @@ def download_with_aws(subject_id, run, target_dir='./tmp/'):
     local_file = os.path.join(target_dir, file_path)
     os.makedirs(os.path.dirname(local_file), exist_ok=True)
     
-    # Si el archivo ya existe y tiene un tamaño razonable (>100MB), lo reutilizamos
     if os.path.exists(local_file) and os.path.getsize(local_file) > 100_000_000:
         print(f"  ⏩ {subject_id} run-{run:02d} ya existe ({os.path.getsize(local_file)/1e6:.1f} MB), se omite descarga.")
         return local_file
@@ -107,35 +134,39 @@ def download_with_aws(subject_id, run, target_dir='./tmp/'):
         print(f"  ⚠️ {subject_id} run-{run:02d} existe pero es pequeño o corrupto, se descarga de nuevo.")
         os.remove(local_file)
     
-    # Construir el comando con la ruta completa
     cmd = [AWS_CMD, "s3", "cp", "--no-sign-request", s3_path, local_file]
-    
     print(f"  🚀 Descargando {subject_id} run-{run:02d} ...")
-    # Ejecutar mostrando la salida en tiempo real (heredada de la terminal)
-    # Esto mostrará las barras de progreso de AWS
     subprocess.run(cmd, check=True)
-    
     print(f"  ✅ Descargado {subject_id} run-{run:02d} ({os.path.getsize(local_file)/1e6:.1f} MB)")
     return local_file
 
 # ============================================================
-# 6. Función que procesa un sujeto/run completo
+# 8. Función que procesa un sujeto/run completo (con manejo seguro de borrado)
 # ============================================================
 def process_one_run(subject_id, run):
     local_file = download_with_aws(subject_id, run)
     codes = process_subject(local_file)
     # Limpiar archivo después de procesar
-    os.remove(local_file)
-    # Limpiar carpeta si está vacía
     try:
-        shutil.rmtree(os.path.dirname(local_file), ignore_errors=True)
-    except:
+        if os.path.exists(local_file):
+            os.remove(local_file)
+    except OSError:
         pass
+    # NO ELIMINAR LA CARPETA COMPARTIDA
     return codes
 
 # ============================================================
-# 7. Procesamiento principal (con reanudación y paralelismo)
+# 9. Procesamiento principal (con reanudación y paralelismo)
 # ============================================================
+# Si PROCESS_ALL = True, obtener todos los sujetos automáticamente
+if PROCESS_ALL:
+    print("Obteniendo lista de todos los sujetos...")
+    TEST_SUBJECTS = get_all_subjects()
+    if not TEST_SUBJECTS:
+        raise RuntimeError("No se encontraron sujetos en el bucket.")
+    print(f"Total de sujetos encontrados: {len(TEST_SUBJECTS)}")
+    print("Primeros 10:", TEST_SUBJECTS[:10])
+
 PROGRESS_FILE = 'progress_state_codes.pkl'
 LAST_INDEX_FILE = 'last_index.txt'
 
@@ -155,7 +186,7 @@ if os.path.exists(LAST_INDEX_FILE):
         start_run = int(parts[1])
     print(f"Reanudando desde sujeto {TEST_SUBJECTS[start_idx]} (índice {start_idx}), run {start_run}")
 
-print(f"Usando {len(TEST_SUBJECTS)} sujetos de prueba: {TEST_SUBJECTS}")
+print(f"Usando {len(TEST_SUBJECTS)} sujetos.")
 print(f"Descargas paralelas: {MAX_WORKERS} a la vez\n")
 
 # Limpiar archivos corruptos en tmp (menores a 100MB)
@@ -211,7 +242,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             logging.error(f"Error inesperado en {sub} run-{run:02d}: {e}")
 
 # ============================================================
-# 8. Guardar resultados finales
+# 10. Guardar resultados finales
 # ============================================================
 all_state_codes = np.array(all_state_codes)
 with open('state_codes_all.pkl', 'wb') as f:
