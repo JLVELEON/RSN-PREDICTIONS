@@ -9,13 +9,13 @@ import pickle
 # ============================================================
 class Config:
     batch_size = 16
-    block_size = 10
-    max_iters = 2000
+    block_size = 30
+    max_iters = 3000
     eval_interval = 100
     learning_rate = 3e-4
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     eval_iters = 200
-    n_embd = 64
+    n_embd = 128
     n_head = 2
     n_layer = 2
     dropout = 0.0
@@ -322,3 +322,13 @@ context = torch.zeros((1, 1), dtype=torch.long, device=Config.device)
 generated = model.generate(context, max_new_tokens=20)[0].tolist()
 print("\n--- Secuencia generada (primeros 20 tokens) ---")
 print(generated)
+
+
+# Después del entrenamiento
+torch.save(model.state_dict(), 'gpt_brain_model.pth')
+print("Modelo guardado en gpt_brain_model.pth")
+
+# Cargar modelo
+# model = GPTLanguageModel()
+# model.load_state_dict(torch.load('gpt_brain_model.pth'))
+# model.to(Config.device)
