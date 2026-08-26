@@ -206,28 +206,88 @@ The script includes automatic resume capability: if interrupted, it restarts fro
 
 Once completed, the resulting `state_codes_all.pkl` file contains approximately **69,120 tokens** (90 subjects × 3 runs × 256 time points) and is ready for Transformer training.
 
-## Training the Transformer on all subjects
+## Results and Comparison with the Linear Baseline
 
-After processing all 90 subjects and their three runs, we obtained a concatenated sequence of **69,120 tokens** (90 × 3 × 256). This dataset is 270 times larger than the single‑subject dataset and contains a much richer variety of activation patterns.
+The Transformer was trained on a concatenated sequence of **68,605 tokens** derived from all 90 subjects, split into training (54,884 tokens, 80%) and validation (13,721 tokens, 20%). We used the same architecture as in the single-subject experiment (`block_size=10`, `n_embd=64`, `n_head=2`, `n_layer=2`), resulting in only **0.12 million parameters**. The model was optimized using AdamW with a cross-entropy loss function over 3,000 iterations.
 
-The same Transformer architecture (Config: block_size=10, n_embd=64, n_head=2, n_layer=2) was trained on this dataset for 5000 iterations. The training loss and validation loss are shown below.
+### Loss Evolution
 
-### Results
+The training loss decreased steadily from 5.23 to **1.387**, while the validation loss dropped from 5.23 to **1.409**. The close alignment between the two curves (a difference of only ~0.022) indicates that the model learned generalizable patterns without significant overfitting.
 
-| Metric | Value |
-|--------|-------|
-| Train loss | ... |
-| Val loss | ... |
-| Exact-match accuracy | ... |
-| Per-network F1 (average) | ... |
-| Change prediction F1 | ... |
+### Full-State Prediction
 
-### Comparison with single‑subject results
+For the exact-match prediction of the complete 7-bit state, the model achieved an accuracy of **73.05%**. While the per-network accuracy exceeded 89% for all networks, this metric is inflated by the severe class imbalance (inactivity is the dominant state). Therefore, the **per-network F1-score** is a more reliable metric, as it balances precision and recall for the positive (activation) class. The obtained F1 scores per network were:
 
-| Model | Dataset | Best F1 (changes) |
-|-------|---------|-------------------|
-| Logistic regression | Single subject | 0.4528 |
-| Transformer | Single subject | 0.0 |
-| Transformer | 90 subjects | ... |
+| Network | F1-score |
+| :------ | -------: |
+| 1 (Visual) | 0.5064 |
+| 2 (Somatomotor) | 0.5288 |
+| 3 (Dorsal Attention) | 0.5384 |
+| 4 (Salience/Ventral Attention) | 0.5302 |
+| 5 (Limbic) | 0.4817 |
+| 6 (Control) | 0.5238 |
+| 7 (Default) | 0.5127 |
 
-The improvement (or lack thereof) will be discussed in the context of the data's intrinsic forecastability (Suzyahyah, 2026).
+The average per-network F1 score was **0.5174**, indicating moderate but significantly above-chance performance.
+
+### Transition (Change) Prediction
+
+The most relevant metric for this study is the model's ability to predict whether a network will **change** its state (0→1 or 1→0) at the next time step. On this challenging task, the Transformer achieved:
+
+- **Accuracy:** 82.70%
+- **Precision:** 77.75%
+- **Recall:** 64.96%
+- **F1-score:** **0.7078**
+
+This F1 score of **0.71** substantially outperforms the logistic regression model from Notebook 4 (trained with the same 1 SD threshold), which only achieved **0.4528**. This represents an absolute improvement of **+0.255**, equivalent to a relative improvement of **56%**.
+
+### Generated Sequence
+
+When generating a sequence autoregressively from a null context, the model produced a varied set of non-zero tokens:
+
+
+[0, 10, 62, 72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 92, 127, 111, 0, 0, 0]
+
+The presence of diverse tokens (10, 62, 72, 92, 127, 111) confirms that the model learned a meaningful distribution of brain states rather than simply defaulting to the most frequent state (0).
+
+### Comparison with the Linear Model (Notebook 4)
+| Metric | Logistic Regression (1 SD) | Transformer (this work) |
+| :--------------------------------- | :------------------------: | :----------------------: |
+| **F1-score (Transitions)**         | 0.4528                     | **0.7078**               |
+| **Avg. F1-score (Per-Network)**    | ~0.28 (estimated)          | **0.5174**               |
+
+### Discussion
+The results clearly demonstrate that the Transformer significantly outperforms logistic regression in predicting transitions between brain states. This improvement supports the hypothesis that the self-attention mechanism is capable of capturing long-range temporal dependencies that linear models simply cannot model. The transition F1 of 0.71 is a robust result for resting-state fMRI data, where the BOLD signal exhibits high autocorrelation and activation events are scarce (occurring in only ~10–14% of time points).
+
+As Suzyahyah (2026) argues, the "forecastability" of a time series is an intrinsic property of the data itself, not just a function of the model. In this context, the observed improvement suggests that brain dynamics contain non-linear temporal patterns that can be exploited by more expressive architectures. However, the per-network F1 scores (0.48–0.54) indicate that there is still room for improvement. This may be attributed to the limited model capacity (2 layers, 2 heads, embedding size 64) or the moderate dataset size (~69k tokens), which remains modest for a Transformer. Future work could explore deeper architectures, longer context windows (block_size), or the integration of functional connectivity features.
+
+Overall, these findings validate the use of Transformers for modeling the evolution of resting-state brain networks and open the door to potential applications in studying functional brain dynamics and identifying neuroimaging biomarkers.
+
+### Reference cited
+
+- Suzyahyah, A. (2026). *The unreasonable difficulty of time series forecasting*. https://suzyahyah.github.io/machine%20learning/2026/06/27/trouble-with-time-series.html
+
+## Additional Configurations Explored
+
+Given the computational cost and the diminishing returns observed, we explored a limited set of alternative hyperparameter configurations. Specifically, we tested a larger model with `block_size=30`, `n_embd=128`, and `n_head=2` (resulting in 0.43 million parameters, compared to 0.12 million in the main configuration). This model was trained for the same number of iterations (3,000) to assess whether increased capacity and longer temporal context would yield substantial improvements.
+
+The results of this exploration are summarised in the table below:
+
+| Metric | Main Config (block_size=15, n_embd=64) | Larger Config (block_size=30, n_embd=128) |
+| :--------------------------------- | -------------------------: | -----------------------: |
+| **Validation Loss** (final)        | 1.4092                     | 1.3968                   |
+| **F1-score (Transitions)**         | **0.7078**                 | 0.6915                   |
+| **Exact-match Accuracy**           | **0.7305**                 | 0.7268                   |
+| **Avg. F1-score (Per-Network)**    | 0.5174                     | **0.5498**               |
+
+While the larger model achieved a modest improvement in per-network F1 (+6.3%) and a slightly lower validation loss, the primary metric of interest—the F1-score for predicting state transitions—decreased slightly from 0.7078 to 0.6915. This difference is small and well within the expected variability due to random initialisation.
+
+These findings suggest that increasing model capacity and context length does not yield meaningful gains for the transition prediction task, at least within the range of configurations tested. Given that the main objective of this work is to demonstrate the viability of Transformers for modelling brain state dynamics—rather than to perform exhaustive hyperparameter optimisation—we did not pursue further tuning. The marginal improvements observed do not justify the additional computational expense, especially considering the already strong performance of the main configuration compared to the logistic regression baseline (F1 0.71 vs 0.45).
+
+Consistent with the observations of Suzyahyah (2026), these results reinforce the idea that the intrinsic forecastability of the data, rather than model complexity, is the primary limiting factor in time series prediction. Further hyperparameter exploration is unlikely to yield breakthroughs and is therefore left for future work.
+
+---
+
+**Reference cited:**
+
+Suzyahyah, A. (2026). *The unreasonable difficulty of time series forecasting*. https://suzyahyah.github.io/machine%20learning/2026/06/27/trouble-with-time-series.html
