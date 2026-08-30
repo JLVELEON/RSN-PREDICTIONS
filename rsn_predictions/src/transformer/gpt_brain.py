@@ -3,47 +3,77 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 import pickle
+import os
 
 # ============================================================
-# CONFIGURACIÓN
+# 1. CLASE DE CONFIGURACIÓN (definida PRIMERO)
 # ============================================================
 class Config:
     batch_size = 16
-    block_size = 30
     max_iters = 3000
     eval_interval = 100
     learning_rate = 3e-4
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     eval_iters = 200
-    n_embd = 128
+    vocab_size = 128
+    block_size = 15
+    n_embd = 64
     n_head = 2
     n_layer = 2
     dropout = 0.0
-    vocab_size = 128          # 2^7 estados posibles
+
 
 # ============================================================
-# CARGA DE DATOS (adaptado a tus archivos)
+# 2. SELECCIÓN DE CONFIGURACIÓN (AHORA Config YA EXISTE)
 # ============================================================
-# Ruta al archivo de state_codes generado en Notebook4
-# Ajusta la ruta según la ubicación real de tu archivo
+# Descomenta UNA de las siguientes opciones y comenta las otras dos.
+
+# ---------- Configuración A: Dropout (regularización) ----------
+# config_name = "A_dropout"
+# Config.block_size = 15
+# Config.n_embd = 64
+# Config.n_layer = 2
+# Config.dropout = 0.1
+
+# ---------- Configuración B: Más capas (profundidad) ----------
+# config_name = "B_deeper"
+# Config.block_size = 15
+# Config.n_embd = 64
+# Config.n_layer = 3
+# Config.dropout = 0.0
+
+# ---------- Configuración C: Más capas + Dropout ----------
+# config_name = "C_deeper_dropout"
+# Config.block_size = 15
+# Config.n_embd = 64
+# Config.n_layer = 3
+# Config.dropout = 0.1
+
+# Nota: la configuración principal (block_size=15, n_embd=64, n_layer=2, dropout=0.0)
+# ya está entrenada anteriormente, por lo que no la repetimos aquí.
+
+
+# ============================================================
+# 3. CARGA DE DATOS
+# ============================================================
 state_codes_path = "../../notebooks/state_codes_all.pkl"
 
 with open(state_codes_path, 'rb') as f:
     state_codes = pickle.load(f)
 
-# Convertir a tensor
 data = torch.tensor(state_codes, dtype=torch.long)
-
-# División train/val (80/20) respetando el orden temporal
 n = int(0.8 * len(data))
 train_data = data[:n]
 val_data = data[n:]
 
 print(f"Datos cargados: {len(data)} estados")
 print(f"Train: {len(train_data)}, Val: {len(val_data)}")
+print(f"Configuración: {config_name}")
+print(f"block_size={Config.block_size}, n_embd={Config.n_embd}, n_layer={Config.n_layer}, dropout={Config.dropout}")
+
 
 # ============================================================
-# MODELO (idéntico al de Karpathy, con Config)
+# 4. MODELO
 # ============================================================
 class Head(nn.Module):
     def __init__(self, head_size):
@@ -110,7 +140,7 @@ class GPTLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding_table = nn.Embedding(Config.vocab_size, Config.n_embd)
         self.position_embedding_table = nn.Embedding(Config.block_size, Config.n_embd)
-        self.blocks = nn.Sequential(*[Block(Config.n_embd, n_head=Config.n_head) for _ in range(Config.n_layer)])
+        self.blocks = nn.Sequential(*[Block(Config.n_embd, Config.n_head) for _ in range(Config.n_layer)])
         self.ln_f = nn.LayerNorm(Config.n_embd)
         self.lm_head = nn.Linear(Config.n_embd, Config.vocab_size)
 
@@ -142,8 +172,9 @@ class GPTLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
         return idx
 
+
 # ============================================================
-# FUNCIONES DE UTILIDAD
+# 5. FUNCIONES DE UTILIDAD
 # ============================================================
 def get_batch(split):
     data = train_data if split == 'train' else val_data
@@ -167,8 +198,9 @@ def estimate_loss():
     model.train()
     return out
 
+
 # ============================================================
-# ENTRENAMIENTO
+# 6. ENTRENAMIENTO
 # ============================================================
 model = GPTLanguageModel()
 m = model.to(Config.device)
@@ -176,10 +208,18 @@ print(f"{sum(p.numel() for p in m.parameters())/1e6:.2f} M parameters")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=Config.learning_rate)
 
+# Listas para almacenar pérdidas
+train_losses = []
+val_losses = []
+steps = []
+
 for iter in range(Config.max_iters):
     if iter % Config.eval_interval == 0 or iter == Config.max_iters - 1:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        train_losses.append(losses['train'].item())
+        val_losses.append(losses['val'].item())
+        steps.append(iter)
 
     xb, yb = get_batch('train')
     logits, loss = model(xb, yb)
@@ -187,8 +227,9 @@ for iter in range(Config.max_iters):
     loss.backward()
     optimizer.step()
 
+
 # ============================================================
-# EVALUACIÓN EN TEST (estado completo)
+# 7. EVALUACIÓN EN TEST
 # ============================================================
 print("\n--- Evaluación en test (estado completo) ---")
 
@@ -198,28 +239,26 @@ def evaluate_full_state(model, data, block_size):
     total_samples = 0
     per_network_correct = torch.zeros(7)
     per_network_total = torch.zeros(7)
-    
+
     with torch.no_grad():
         for i in range(len(data) - block_size):
             context = data[i:i+block_size].unsqueeze(0).to(Config.device)
             target = data[i+block_size].item()
-            
+
             logits, _ = model(context)
             pred = logits[0, -1, :].argmax().item()
-            
-            # Exact-match
+
             if pred == target:
                 total_correct += 1
             total_samples += 1
-            
-            # Per-network accuracy (convertir tokens a 7 bits)
+
             target_bits = [(target >> b) & 1 for b in range(6, -1, -1)]
             pred_bits = [(pred >> b) & 1 for b in range(6, -1, -1)]
             for b in range(7):
                 if target_bits[b] == pred_bits[b]:
                     per_network_correct[b] += 1
                 per_network_total[b] += 1
-    
+
     exact_acc = total_correct / total_samples
     per_network_acc = per_network_correct / per_network_total
     return exact_acc, per_network_acc
@@ -230,22 +269,20 @@ print("Per-network accuracy:")
 for i, acc in enumerate(per_network_acc, 1):
     print(f"  Red {i}: {acc:.4f}")
 
-# F1 por red (necesitamos precisión y recall)
-# Lo calculamos con los mismos datos
 def compute_per_network_f1(model, data, block_size):
     model.eval()
     tp = torch.zeros(7)
     fp = torch.zeros(7)
     fn = torch.zeros(7)
-    
+
     with torch.no_grad():
         for i in range(len(data) - block_size):
             context = data[i:i+block_size].unsqueeze(0).to(Config.device)
             target = data[i+block_size].item()
-            
+
             logits, _ = model(context)
             pred = logits[0, -1, :].argmax().item()
-            
+
             target_bits = [(target >> b) & 1 for b in range(6, -1, -1)]
             pred_bits = [(pred >> b) & 1 for b in range(6, -1, -1)]
             for b in range(7):
@@ -255,7 +292,7 @@ def compute_per_network_f1(model, data, block_size):
                     fp[b] += 1
                 elif target_bits[b] == 1 and pred_bits[b] == 0:
                     fn[b] += 1
-    
+
     f1 = torch.zeros(7)
     for b in range(7):
         if tp[b] + fp[b] > 0 and tp[b] + fn[b] > 0:
@@ -269,9 +306,6 @@ print("\nF1-score por red:")
 for i, f1 in enumerate(f1_per_network, 1):
     print(f"  Red {i}: {f1:.4f}")
 
-# ============================================================
-# EVALUACIÓN EN TEST (cambios)
-# ============================================================
 print("\n--- Evaluación en test (cambios) ---")
 
 def evaluate_changes(model, data, block_size):
@@ -280,19 +314,18 @@ def evaluate_changes(model, data, block_size):
     fp = 0
     fn = 0
     tn = 0
-    
+
     with torch.no_grad():
         for i in range(len(data) - block_size - 1):
             context = data[i:i+block_size].unsqueeze(0).to(Config.device)
-            # Target: cambio entre el token i+block_size y i+block_size+1
             current = data[i+block_size].item()
             next_token = data[i+block_size+1].item()
             target_change = 1 if current != next_token else 0
-            
+
             logits, _ = model(context)
             pred_token = logits[0, -1, :].argmax().item()
             pred_change = 1 if pred_token != current else 0
-            
+
             if target_change == 1 and pred_change == 1:
                 tp += 1
             elif target_change == 0 and pred_change == 1:
@@ -301,12 +334,12 @@ def evaluate_changes(model, data, block_size):
                 fn += 1
             else:
                 tn += 1
-    
+
     accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-    
+
     return accuracy, precision, recall, f1
 
 acc_changes, prec_changes, rec_changes, f1_changes = evaluate_changes(model, val_data, Config.block_size)
@@ -315,20 +348,45 @@ print(f"Precision (cambios): {prec_changes:.4f}")
 print(f"Recall (cambios): {rec_changes:.4f}")
 print(f"F1-score (cambios): {f1_changes:.4f}")
 
-# ============================================================
-# GENERACIÓN (muestra 5 estados predichos)
-# ============================================================
+print("\n--- Secuencia generada (primeros 20 tokens) ---")
 context = torch.zeros((1, 1), dtype=torch.long, device=Config.device)
 generated = model.generate(context, max_new_tokens=20)[0].tolist()
-print("\n--- Secuencia generada (primeros 20 tokens) ---")
 print(generated)
 
 
-# Después del entrenamiento
-torch.save(model.state_dict(), 'gpt_brain_model.pth')
-print("Modelo guardado en gpt_brain_model.pth")
+# ============================================================
+# 8. GUARDAR RESULTADOS
+# ============================================================
+results = {
+    'config_name': config_name,
+    'config': {
+        'block_size': Config.block_size,
+        'n_embd': Config.n_embd,
+        'n_layer': Config.n_layer,
+        'n_head': Config.n_head,
+        'dropout': Config.dropout,
+        'batch_size': Config.batch_size,
+        'learning_rate': Config.learning_rate,
+        'max_iters': Config.max_iters,
+    },
+    'train_losses': train_losses,
+    'val_losses': val_losses,
+    'steps': steps,
+    'exact_acc': exact_acc,
+    'per_network_acc': per_network_acc.tolist(),
+    'f1_per_network': f1_per_network.tolist(),
+    'f1_changes': f1_changes,
+    'accuracy_changes': acc_changes,
+    'precision_changes': prec_changes,
+    'recall_changes': rec_changes,
+    'generated': generated,
+}
 
-# Cargar modelo
-# model = GPTLanguageModel()
-# model.load_state_dict(torch.load('gpt_brain_model.pth'))
-# model.to(Config.device)
+filename = f"results_{config_name}.pkl"
+with open(filename, 'wb') as f:
+    pickle.dump(results, f)
+print(f"\nResultados guardados en {filename}")
+
+# Guardar modelo
+torch.save(model.state_dict(), f'gpt_brain_model_{config_name}.pth')
+print(f"Modelo guardado en gpt_brain_model_{config_name}.pth")
