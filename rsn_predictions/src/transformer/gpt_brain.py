@@ -20,8 +20,9 @@ class Config:
     n_embd = 64
     n_head = 2
     n_layer = 2
-    dropout = 0.0
-
+    dropout = 0.0 
+    
+config_name = "Main"
 
 # ============================================================
 # 2. SELECCIÓN DE CONFIGURACIÓN (AHORA Config YA EXISTE)
